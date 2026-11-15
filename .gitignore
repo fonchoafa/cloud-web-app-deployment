@@ -1,0 +1,26 @@
+# Secrets: never commit these
+*.pem
+*.key
+id_rsa
+id_ed25519
+*.ppk
+.env
+.env.*
+!.env.example
+
+# Terraform (state can contain the generated admin key)
+.terraform/
+*.tfstate
+*.tfstate.*
+crash.log
+terraform.tfvars
+
+# Node
+node_modules/
+uploads/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

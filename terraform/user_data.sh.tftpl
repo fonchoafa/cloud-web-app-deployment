@@ -1,0 +1,147 @@
+#!/usr/bin/env bash
+# Runs once as root on first boot (cloud-init). Output: /var/log/cloud-init-output.log
+set -euxo pipefail
+export DEBIAN_FRONTEND=noninteractive
+
+apt-get update -y
+apt-get install -y ca-certificates curl git nginx ufw logrotate
+
+# ---- Node.js 22 LTS
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt-get install -y nodejs
+
+# ---- Service user, application code, dependencies
+useradd --system --create-home --home-dir /opt/cloud-app --shell /usr/sbin/nologin cloudapp || true
+git clone --depth 1 --branch ${repo_branch} ${repo_url} /opt/cloud-app/src
+cd /opt/cloud-app/src/app
+npm ci --omit=dev
+chown -R cloudapp:cloudapp /opt/cloud-app
+install -d -o cloudapp -g cloudapp -m 750 /var/log/cloud-app
+
+# ---- Configuration: plain settings only. The secret itself is read from SSM at startup.
+cat > /etc/cloud-app.env <<'ENVFILE'
+NODE_ENV=production
+PORT=3000
+AWS_REGION=${region}
+TABLE_NAME=${table_name}
+BUCKET_NAME=${bucket_name}
+SECRET_PARAM_NAME=${secret_param}
+LOG_FILE=/var/log/cloud-app/app.log
+ENVFILE
+chown root:cloudapp /etc/cloud-app.env
+chmod 640 /etc/cloud-app.env
+
+# ---- systemd service with resource limits and sandboxing
+cat > /etc/systemd/system/cloud-app.service <<'UNIT'
+[Unit]
+Description=Cloud Notes web app
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=cloudapp
+Group=cloudapp
+WorkingDirectory=/opt/cloud-app/src/app
+EnvironmentFile=/etc/cloud-app.env
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=3
+
+# Resource quotas for this process
+MemoryMax=300M
+CPUQuota=80%
+TasksMax=100
+
+# Sandboxing
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/cloud-app
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
+cat > /etc/logrotate.d/cloud-app <<'LOGROTATE'
+/var/log/cloud-app/app.log {
+  daily
+  rotate 3
+  compress
+  missingok
+  notifempty
+  copytruncate
+}
+LOGROTATE
+
+systemctl daemon-reload
+systemctl enable --now cloud-app
+
+# ---- nginx reverse proxy: port 80 to the app on 127.0.0.1:3000
+cat > /etc/nginx/sites-available/cloud-app <<'NGINX'
+server {
+  listen 80 default_server;
+  listen [::]:80 default_server;
+  server_name _;
+  client_max_body_size 3m;
+
+  location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+  }
+}
+NGINX
+rm -f /etc/nginx/sites-enabled/default
+ln -sf /etc/nginx/sites-available/cloud-app /etc/nginx/sites-enabled/cloud-app
+nginx -t
+systemctl enable nginx
+systemctl restart nginx
+
+# ---- Host firewall (the AWS security group is the first layer)
+ufw default deny incoming
+ufw default allow outgoing
+ufw allow OpenSSH
+ufw allow 'Nginx HTTP'
+ufw --force enable
+
+# ---- CloudWatch agent: ship the app log, nginx access log and memory/disk metrics
+curl -fsSL -o /tmp/amazon-cloudwatch-agent.deb https://amazoncloudwatch-agent.s3.amazonaws.com/ubuntu/amd64/latest/amazon-cloudwatch-agent.deb
+dpkg -i /tmp/amazon-cloudwatch-agent.deb
+cat > /opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json <<'CWAGENT'
+{
+  "agent": { "run_as_user": "root" },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          { "file_path": "/var/log/cloud-app/app.log", "log_group_name": "${log_group}", "log_stream_name": "{instance_id}-app" },
+          { "file_path": "/var/log/nginx/access.log", "log_group_name": "${log_group}", "log_stream_name": "{instance_id}-nginx" }
+        ]
+      }
+    }
+  },
+  "metrics": {
+    "namespace": "CloudNotes",
+    "metrics_collected": {
+      "mem": { "measurement": ["mem_used_percent"] },
+      "disk": { "measurement": ["used_percent"], "resources": ["/"] }
+    }
+  }
+}
+CWAGENT
+/opt/aws/amazon-cloudwatch-agent/bin/amazon-cloudwatch-agent-ctl -a fetch-config -m ec2 -c file:/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json -s
+
+# ---- Harden SSH: key-only, no root login
+cat > /etc/ssh/sshd_config.d/99-hardening.conf <<'SSHD'
+PermitRootLogin no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+MaxAuthTries 3
+X11Forwarding no
+SSHD
+sshd -t
+systemctl reload ssh
