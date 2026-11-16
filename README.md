@@ -5,7 +5,9 @@ Author: Foncho Afanwi Ngwa ([@fonchoafa](https://github.com/fonchoafa))
 
 This repository deploys a small Node.js web app, **Cloud Notes**, to AWS and documents the cloud services behind it: compute, object storage, a managed database, virtual networking, IAM and monitoring. Everything is created with Terraform and removed with one command.
 
-**Live website:** `http://<fill in after deploy>`
+**Live website:** http://44.212.240.159 (health check: http://44.212.240.159/health)
+
+The site is served over plain HTTP, so browsers show "Not secure". It is a training deployment with no domain or TLS certificate.
 
 ## Architecture
 
@@ -20,7 +22,7 @@ Browser --HTTP 80--> Security group --> EC2 (Ubuntu 24.04) --> nginx --> Node.js
 
 | Layer | Service | Purpose |
 | --- | --- | --- |
-| Compute | EC2 `t3.micro`, systemd, nginx | Runs the app, limited to 300 MB RAM and 80% CPU |
+| Compute | EC2 `t3.micro`, Elastic IP, systemd, nginx | Runs the app, limited to 300 MB RAM and 80% CPU |
 | Object storage | S3 | Private, encrypted bucket for uploads, 30-day expiry |
 | Managed database | DynamoDB (on-demand) | Stores notes |
 | Networking | VPC, security group, `ufw` | 80 public, 22 only from my IP, app port not exposed |
@@ -44,7 +46,7 @@ Browser --HTTP 80--> Security group --> EC2 (Ubuntu 24.04) --> nginx --> Node.js
 
 ```powershell
 cd terraform
-copy terraform.tfvars.example terraform.tfvars   # set my_ip_cidr and alert_email
+copy terraform.tfvars   # set my_ip_cidr and alert_email
 terraform init
 terraform plan
 terraform apply
@@ -69,7 +71,13 @@ Push this repo to GitHub **before** `apply`, because the server clones the code 
 
 ## Lessons learned
 
-> Replace this with 3 or 4 sentences in your own words after you deploy: what went wrong at first, how you found the cause, and what you would do differently.
+- **The public IP changed.** After I rebooted the server, the site and SSH stopped answering on the old address. The auto-assigned public IP is released when an instance is stopped and started, so I added an Elastic IP in Terraform to keep the live URL fixed.
+- **SSH timed out because my own IP changed.** The security group only allows SSH from `my_ip_cidr`. When my home connection got a new address, I had to update that value and run `terraform apply`.
+- **A public demo needs care.** Anyone can upload files to the live page, and I accidentally uploaded a personal file while testing. I deleted it with the protected delete endpoint. Next time I would test with dummy files and restrict who can download attachments.
+- **Scanners arrive within minutes.** The app log showed a bot probing `/admin/actuator/heapdump` shortly after launch. It got a 404, which confirmed that the security group, rate limits and default 404 responses matter from the first minute.
+- **What I would add next:** a domain with HTTPS, and a remote Terraform state so the setup is easier to share.
+
+![Live site](screenshots/01-live-site.png)
 
 ## Clean up
 

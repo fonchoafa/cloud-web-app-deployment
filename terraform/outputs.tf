@@ -1,19 +1,19 @@
 output "public_ip" {
-  description = "Public IP of the web server"
-  value       = aws_instance.app.public_ip
+  description = "Fixed public IP (Elastic IP) of the web server"
+  value       = aws_eip.app.public_ip
 }
 
 output "site_url" {
   description = "The live website"
-  value       = "http://${aws_instance.app.public_ip}"
+  value       = "http://${aws_eip.app.public_ip}"
 }
 
 output "health_url" {
-  value = "http://${aws_instance.app.public_ip}/health"
+  value = "http://${aws_eip.app.public_ip}/health"
 }
 
 output "ssh_command" {
-  value = "ssh -i ~/.ssh/id_ed25519 ubuntu@${aws_instance.app.public_ip}"
+  value = "ssh -i ~/.ssh/id_ed25519 ubuntu@${aws_eip.app.public_ip}"
 }
 
 output "notes_table" {

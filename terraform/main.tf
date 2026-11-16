@@ -327,3 +327,13 @@ resource "aws_instance" "app" {
 
   tags = { Name = var.name }
 }
+
+# A fixed public address. Without it, the auto-assigned IP changes whenever the instance is
+# stopped and started, which breaks the live URL and any SSH rule or bookmark pointing at it.
+# `terraform destroy` releases it, so it is never left behind unattached.
+resource "aws_eip" "app" {
+  instance = aws_instance.app.id
+  domain   = "vpc"
+
+  tags = { Name = "${var.name}-eip" }
+}
